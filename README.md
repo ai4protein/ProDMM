@@ -212,3 +212,29 @@ python score_dms.py --fasta example_data/NCDS_zhang_2009.fasta \
 ### 4. Fine-tuning on downstream tasks
 See in ./fintunes
 
+## ProDMM-Seq2Seq
+
+### 1. Reverse Translation Inference
+```shell
+bash finetunes/finetune_seq2seq/Reverse-translation.sh
+```
+
+### 2. Cross-species Inference
+```shell
+bash finetunes/finetune_seq2seq/Cross-species.sh
+```
+
+### 3. Zero-shot Inference 
+```shell
+bash finetunes/finetune_seq2seq/Zero-shot.sh
+```
+
+### 4. CDS-Promoter Generation
+```shell
+bash finetunes/finetune_seq2seq/CDS-promoter.sh
+```
+
+### 5. Promoter-CDS Generation
+```shell
+bash finetunes/finetune_seq2seq/Promoter-cds.sh
+```

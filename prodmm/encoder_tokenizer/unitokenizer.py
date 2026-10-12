@@ -1,7 +1,10 @@
-from typing import List, Union, Optional, Tuple, Any, Literal
-import torch
+"""Tokenize tagged protein, coding DNA, and non-coding DNA sequences."""
+
 import re
 from pathlib import Path
+from typing import Literal
+
+import torch
 
 BASE_DIR = Path(__file__).resolve().parent
 AAS_TOKENS = list("LAGVSERTIDPKQNFYMHWC*")
@@ -96,21 +99,19 @@ SEP_TOKEN = "<sep>"
 
 
 class AASTokenizer:
-
     def __init__(self):
         self.pattern = "|".join(map(re.escape, SPECIAL_TOKENS)) + "|."
 
-    def tokenize(self, text: str) -> List[str]:
+    def tokenize(self, text: str) -> list[str]:
         matches = re.findall(self.pattern, text)
         return matches
 
 
 class CDSTokenizer:
-
     def __init__(self):
         self.pattern = "|".join(map(re.escape, SPECIAL_TOKENS))
 
-    def tokenize(self, text: str) -> List[str]:
+    def tokenize(self, text: str) -> list[str]:
         # 转换为小写
         text = text.lower()
         # 先根据特殊标记拆分字符串
@@ -130,18 +131,16 @@ class CDSTokenizer:
 
 
 class NCDSTokenizer:
-
     def __init__(self):
         self.pattern = "|".join(map(re.escape, SPECIAL_TOKENS)) + "|."
 
-    def tokenize(self, text: str) -> List[str]:
+    def tokenize(self, text: str) -> list[str]:
         text = text.lower()
         matches = re.findall(self.pattern, text)
         return matches
 
 
-class TaggedTokneizer:
-
+class TaggedTokenizer:
     def __init__(self):
         self.legal_data_types = {"ncds", "cds", "aas"}
         self.partten = r"<(ncds|cds|aas)>(.*?)</\1>"
@@ -150,13 +149,9 @@ class TaggedTokneizer:
         self.ncds_tokenizer = NCDSTokenizer()
         self.cds_tokenizer = CDSTokenizer()
 
-    def tokenize(self, text: Union[str, Tuple[str, str], List[str]]) -> List[str]:
+    def tokenize(self, text: str | tuple[str, str] | list[str]) -> list[str]:
         has_input_data_type = False
-        if isinstance(text, tuple):
-            text, data_type = text
-            has_input_data_type = True
-            assert data_type in self.legal_data_types, f"Invalid data_type: {data_type}"
-        elif isinstance(text, list):
+        if isinstance(text, (tuple, list)):
             text, data_type = text
             has_input_data_type = True
             assert data_type in self.legal_data_types, f"Invalid data_type: {data_type}"
@@ -198,12 +193,15 @@ class TaggedTokneizer:
         return tokens[:-1]  # Remove the last SEP_TOKEN
 
 
-class UniTokenizer:
+# Backward-compatible alias for the historical misspelling.
+TaggedTokneizer = TaggedTokenizer
 
+
+class UniTokenizer:
     def __init__(
         self,
     ):
-        self.tokenizer = TaggedTokneizer()
+        self.tokenizer = TaggedTokenizer()
         self.vocab_file = BASE_DIR / "vocab.txt"
         self.vocab = self.load_vocab()
         self.inverse_vocab = {v: k for k, v in self.vocab.items()}
@@ -238,27 +236,27 @@ class UniTokenizer:
             CDS_TOKENS
         ) + len(SPECIAL_TOKENS)
 
-    def load_vocab(self) -> List[str]:
+    def load_vocab(self) -> dict[str, int]:
         with open(self.vocab_file, "r") as f:
             vocab = f.read().splitlines()
         vocab = {v: i for i, v in enumerate(vocab)}
         return vocab
 
     def itos(self, token_id: int) -> str:
-        return self.inverse_vocab[token_id]
+        return self.inverse_vocab[int(token_id)]
 
     def stoi(self, token: str) -> int:
-        return self.vocab[token] if token in self.vocab else self.unk_token_id
+        return self.vocab.get(token, self.unk_token_id)
 
-    def add_special_tokens(self, tokens: List[str]) -> List[str]:
+    def add_special_tokens(self, tokens: list[str]) -> list[str]:
         return [self.cls_token] + tokens + [self.sep_token]
 
     def tokenize(
         self,
-        text: Union[str, Tuple[str, str], List[str]],
-        max_length: int = None,
+        text: str | tuple[str, str] | list[str],
+        max_length: int | None = None,
         special_add="encoder",  # encoder, decoder, none
-    ) -> List[str]:
+    ) -> list[str]:
         tokens = self.tokenizer.tokenize(text)
         if max_length:
             tokens = tokens[:max_length]
@@ -276,23 +274,25 @@ class UniTokenizer:
     def __len__(self):
         return len(self.vocab)
 
-    def convert_tokens_to_ids(self, tokens: List[str]) -> List[int]:
+    def convert_tokens_to_ids(self, tokens: list[str]) -> list[int]:
         return [self.stoi(t) for t in tokens]
 
-    def convert_ids_to_tokens(self, ids: List[int]) -> List[str]:
+    def convert_ids_to_tokens(self, ids: list[int]) -> list[str]:
+        if isinstance(ids, torch.Tensor):
+            ids = ids.tolist()
         return [self.itos(i) for i in ids]
 
     def convert_batch_tokens(
         self,
-        batch_tokens: List[List[str]],
+        batch_tokens: list[list[str]],
         has_special_tokens=False,  # whether the batch_tokens has special tokens
         special_add="encoder",
         padding: bool = True,
         return_attention_mask: bool = True,
         return_length: bool = True,
         return_special_tokens_mask: bool = True,
-        return_tensors: Optional[Literal["pt", None]] = None,
-    ) -> torch.Tensor:
+        return_tensors: Literal["pt"] | None = None,
+    ) -> dict:
         if not has_special_tokens:
             if special_add == "encoder":
                 batch_tokens = [
@@ -307,9 +307,9 @@ class UniTokenizer:
             else:
                 pass
 
-        speical_tokens_mask: List[List[int]] = []
-        batch_lengths: List[int] = []
-        attention_mask: List[List[int]] = []
+        speical_tokens_mask: list[list[int]] = []
+        batch_lengths: list[int] = []
+        attention_mask: list[list[int]] = []
 
         for tokens in batch_tokens:
             batch_lengths.append(len(tokens))
@@ -381,10 +381,10 @@ class UniTokenizer:
 
     def encode(
         self,
-        text: Union[str, Tuple[str, str], List[str]],
-        max_length: int = None,
+        text: str | tuple[str, str] | list[str],
+        max_length: int | None = None,
         special_add: str = "encoder",
-    ) -> torch.Tensor:
+    ) -> list[int]:
         tokens = self.tokenize(
             text,
             special_add=special_add,
@@ -394,16 +394,16 @@ class UniTokenizer:
 
     def batch_encode(
         self,
-        batch_text: Union[List[str], List[Tuple[str, str]], List[List[str]]],
+        batch_text: list[str] | list[tuple[str, str]] | list[list[str]],
         special_add: str = "encoder",
-        max_length: Optional[int] = None,
+        max_length: int | None = None,
         padding: bool = True,
         return_attention_mask: bool = True,
         return_length: bool = False,
         return_special_tokens_mask: bool = False,
         return_tensors=None,
-    ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], Any]:
-        batch_tokens: List[List[str]] = []
+    ) -> dict:
+        batch_tokens: list[list[str]] = []
         for text in batch_text:
             tokens = self.tokenize(
                 text,
@@ -424,9 +424,9 @@ class UniTokenizer:
 
     def __call__(
         self,
-        batch_text: Union[List[str], List[Tuple[str, str]], List[List[str]]],
+        batch_text: list[str] | list[tuple[str, str]] | list[list[str]],
         special_add: str = "encoder",
-        max_length: Optional[int] = None,
+        max_length: int | None = None,
         padding: bool = True,
         return_attention_mask: bool = True,
         return_length: bool = True,

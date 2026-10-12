@@ -12,8 +12,8 @@ from transformers.modeling_outputs import (
     ModelOutput,
     BaseModelOutput,
 )
-from transformers.modeling_utils import (
-    PreTrainedModel,
+from transformers.modeling_utils import PreTrainedModel
+from transformers.pytorch_utils import (
     find_pruneable_heads_and_indices,
     prune_linear_layer,
 )

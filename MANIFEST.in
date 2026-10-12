@@ -1,0 +1,7 @@
+include CONTRIBUTING.md
+include score_dms.py
+recursive-include docs *.md
+recursive-include examples *.py
+recursive-include finetunes *.sh
+recursive-include example_data *.fasta *.csv *.json *.jsonl
+global-exclude *.py[cod]

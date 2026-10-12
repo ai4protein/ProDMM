@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prodmm"
+version = "0.1.0"
+description = "Unified protein and DNA sequence modeling with ProDMM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+dependencies = [
+    "torch>=2.5",
+    "transformers==4.44.2",
+    "pandas>=2",
+    "numpy>=1.26",
+    "biopython>=1.83",
+    "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+train = [
+    "lightning>=2.4,<3",
+    "datasets>=2.19,<4",
+    "scikit-learn>=1.4",
+    "tensorboard>=2.16",
+    "wandb>=0.17",
+]
+dev = ["pytest>=8", "build>=1", "ruff>=0.6"]
+
+[project.scripts]
+prodmm-score-dms = "prodmm.scoring:main"
+prodmm-seq2seq = "finetunes.finetune_seq2seq.finetune_seq2seq:main"
+
+[tool.setuptools.packages.find]
+include = ["prodmm*", "finetunes*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"prodmm.encoder_tokenizer" = ["vocab.txt"]
+"prodmm.seq2seq_tokenizer" = ["prompt_vocab.txt"]
+"finetunes" = ["*.sh"]
+"finetunes.finetune_seq2seq" = ["*.sh"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

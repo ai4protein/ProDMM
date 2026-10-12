@@ -12,8 +12,8 @@ from transformers.modeling_outputs import (
     ModelOutput,
     BaseModelOutput,
 )
-from transformers.modeling_utils import (
-    PreTrainedModel,
+from transformers.modeling_utils import PreTrainedModel
+from transformers.pytorch_utils import (
     find_pruneable_heads_and_indices,
     prune_linear_layer,
 )
@@ -1163,6 +1163,10 @@ def shift_tokens_right(
 class ProLMForConditionalGeneration(PreTrainedModel):
 
     _tied_weights_keys = [
+        # These aliases are present in historical checkpoints. Declare them
+        # so safetensors can save the existing sharing without changing weights.
+        "encoder.embeddings.weight",
+        "decoder.embeddings.weight",
         "encoder.embeddings.word_embeddings.weight",
         "decoder.embeddings.word_embeddings.weight",
         "lm_head.decoder.weight",
@@ -1188,8 +1192,6 @@ class ProLMForConditionalGeneration(PreTrainedModel):
 
         if encdoer_ckpt is not None:
             self.encoder = ProLMModel.from_pretrained(encdoer_ckpt)
-            print(self.encoder.embeddings.word_embeddings.weight.shape)
-            initial_weights = {name: param.clone().detach() for name, param in self.encoder.named_parameters()}
 
 
             original_embeddings = self.encoder.embeddings.word_embeddings.weight.data
@@ -1198,19 +1200,18 @@ class ProLMForConditionalGeneration(PreTrainedModel):
             new_embeddings.weight.data[:original_embeddings.size(0)] = original_embeddings
 
             new_embeddings.weight.data[original_embeddings.size(0):] = torch.randn(3, config.hidden_size)
-            print(self.encoder)
             self.encoder.embeddings.word_embeddings =  new_embeddings
         else:
             self.encoder = ProLMModel(encoder_config)
-            initial_weights = {name: param.clone().detach() for name, param in self.encoder.named_parameters()}
         
 
-        print(self.encoder.embeddings.word_embeddings.weight.shape)
 
         decoder_config = deepcopy(config)
         decoder_config.is_decoder = True
         decoder_config.add_cross_attention = True
-        decoder_config.num_hidden_layers = 12
+        # Existing checkpoints use 12 decoder layers. Smaller research configs
+        # can set decoder_num_hidden_layers explicitly without changing that default.
+        decoder_config.num_hidden_layers = getattr(config, "decoder_num_hidden_layers", 12)
         self.decoder = ProLMModel(decoder_config)
         self.decoder.embeddings.word_embeddings = self.shared
         self.decoder_config = decoder_config
@@ -1225,13 +1226,6 @@ class ProLMForConditionalGeneration(PreTrainedModel):
         self.init_weights()
         self.tie_weights()
         
-        final_weights = {name: param.clone().detach() for name, param in self.encoder.named_parameters()}
-        for name in initial_weights:
-            if torch.equal(initial_weights[name], final_weights[name]):
-                #print(f"Weight {name} is unchanged")
-                pass
-            else:
-                print(f"Weight {name} has been updated")
     def tie_weights(self):
         # tie encoder & decoder if needed
         self._tie_or_clone_weights(self.encoder.embeddings, self.shared)
@@ -1302,9 +1296,7 @@ class ProLMForConditionalGeneration(PreTrainedModel):
                 labels, self.config.pad_token_id, self.config.decoder_start_token_id
             )
             if decoder_attention_mask is None:
-                decoder_attention_mask = decoder_input_ids.clone().new_tensor(
-                    decoder_input_ids != self.config.pad_token_id
-                )
+                decoder_attention_mask = decoder_input_ids != self.config.pad_token_id
             labels[labels[:, :] == self.config.pad_token_id] = -100
 
         # Decode

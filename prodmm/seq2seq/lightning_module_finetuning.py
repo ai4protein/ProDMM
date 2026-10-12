@@ -1,301 +1,128 @@
-from lightning import LightningModule
-from lightning.pytorch.utilities.types import STEP_OUTPUT
-from prodmm.seqseq.modeling_prolm_seq2seq import ProLMForConditionalGeneration
-from prodmm.seq2seq.configuration_prolm import ProLMConfig
-from torchmetrics import Accuracy
-import torch
-from transformers import get_scheduler
-from typing import Any
-from torch.utils.data import DataLoader
-from .dataset import get_dataset
-from .collators import Seq2SeqCollator
-import numpy as np
-import csv
-import os
-def check_freeze(model):
-    for name, param in model.named_parameters():
-        # if 'encoder' in name:
-        if param.requires_grad:
-            print(f"{name} is not frozen")
-        else:
-            print(f"{name} is frozen")
+"""Lightning integration for paired-sequence training and evaluation."""
 
-class LightningProLM(LightningModule):
+from pathlib import Path
+
+import torch
+from lightning import LightningModule
+from torchmetrics import MeanMetric
+from transformers import get_scheduler
+
+from .configuration_prolm import ProLMConfig
+from .modeling_prolm_seq2seq import ProLMForConditionalGeneration
+
+
+class Seq2SeqModule(LightningModule):
+    """Wrap the seq2seq model without owning datasets or data loaders.
+
+    Evaluation uses teacher-forced logits. Loss and accuracy are averaged
+    over target tokens, excluding labels masked with -100 by the collator.
+    """
 
     def __init__(
         self,
-        pretrain_task="mlm",
-        config_path='',
-        lr=None,
-        adam_epsilon=1e-8,
-        adam_beta1=0.9,
-        adam_beta2=0.999,
-        warmup_steps=None,
-        warmup_max_steps=None,
-        weight_dacay=0.01,
-        scheduler_type="linear",
-        eval_determinstic=False,
-        encoder_ckpt=None,
-        args=None,
-        tokenizer=None,
-        cds_gen=None,
-        task_type=None,
-        save_output_result=None,
+        config_path: str | Path,
+        checkpoint: str | Path | None = None,
+        encoder_checkpoint: str | Path | None = None,
+        frozen_encoder: bool = False,
+        cds_gen: bool = False,
+        task_type: str = "prot_cds",
+        lr: float = 5e-5,
+        weight_decay: float = 0.01,
+        adam_beta1: float = 0.9,
+        adam_beta2: float = 0.999,
+        adam_epsilon: float = 1e-8,
+        scheduler_type: str = "linear",
+        warmup_steps: int = 0,
     ):
-        print(f"Trying to load config from: {config_path}")
-        try:
-            self.config = ProLMConfig.from_pretrained(config_path)
-            print("Config loaded successfully.")
-        except Exception as e:
-            print(f"Failed to load config: {e}")
         super().__init__()
-        self.pretrain_task = pretrain_task
-       
-        if self.pretrain_task == "mlm":
-            self.model = ProLMForMaskedLM(self.config)
-        elif self.pretrain_task == "seq2seq":     
-            if args.pretrain_ckpt is not None:
-                print(f"Load model from the checkpoint{args.pretrain_ckpt}")
-                self.model = ProLMForConditionalGeneration.from_pretrained(args.pretrain_ckpt, cds_gen=args.cds_gen)
-            else:
-                print("Init model from the encoder checkpoint")
-                self.model = ProLMForConditionalGeneration(self.config, encoder_ckpt)
-            if args.frozen_encoder and not args.use_decoder:
-                for param in self.model.encoder.parameters():
-                    param.requires_grad = False
-                #check_freeze(self.model)
-        self.lr = lr
-        self.adam_epsilon = adam_epsilon
-        self.adam_beta1 = adam_beta1
-        self.adam_beta2 = adam_beta2
-        self.weight_decay = weight_dacay
-        self.scheduler_type = scheduler_type
-        self.warmup_max_steps = warmup_max_steps
-        self.warmup_steps = warmup_steps
-        self.eval_determinstic = eval_determinstic
-        self.args = args
-        self.validation_outputs = [] 
-        self.test_outputs = []
-        self.save_output_result = save_output_result
         self.save_hyperparameters()
-        if self.args.use_decoder:
-                self.eval_collator = DecoderCollator(tokenizer)
+        config = ProLMConfig.from_pretrained(config_path)
+        if checkpoint is None:
+            self.model = ProLMForConditionalGeneration(
+                config, encoder_checkpoint, cds_gen=cds_gen, task_type=task_type
+            )
         else:
-            self.eval_collator = Seq2SeqCollator(tokenizer)
-        self._testset = get_dataset(self.args.test_file, streaming=False)
-        self.tokenizer = tokenizer
-        self.cds_gen = args.cds_gen
-        self.task_type = args.task_type
-        self.use_decoder = args.use_decoder
-    def compute_accuracy(self, preds, labels):
-        # Calculate the number of correct predictions
-        correct = (preds == labels).float()
-        # Calculate accuracy
-        accuracy = correct.sum() / len(correct)
-        return accuracy
+            self.model = ProLMForConditionalGeneration.from_pretrained(
+                checkpoint, cds_gen=cds_gen, task_type=task_type
+            )
+        if frozen_encoder:
+            self.model.encoder.requires_grad_(False)
 
-    def training_step(self, batch, *args: Any, **kwargs: Any) -> STEP_OUTPUT:
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
-        labels = batch["labels"]
-        output = self.model(
-            input_ids=input_ids, 
-            labels=labels, 
-            attention_mask=attention_mask
-        )
-        loss = output.loss
-        perplexity = torch.exp(loss.detach())
+        self.validation_loss = MeanMetric()
+        self.validation_accuracy = MeanMetric()
+        self.test_loss = MeanMetric()
+        self.test_accuracy = MeanMetric()
 
-        self.log(
-            "train/loss",
-            loss.detach(),
-            on_step=True,
-            on_epoch=False,
-            prog_bar=True,
-            logger=True,
-            sync_dist=self.trainer.num_devices > 1,
-        )
-        self.log(
-            "train/perplexity",
-            perplexity,
-            on_step=True,
-            on_epoch=False,
-            prog_bar=True,
-            logger=True,
-            sync_dist=self.trainer.num_devices > 1,
-        )
-        self.log(
-            "train/lr",
-            self.optimizers().param_groups[0]["lr"],
-            on_step=True,
-            on_epoch=False,
-            prog_bar=True,
-            logger=True,
-            sync_dist=False,
-            rank_zero_only=True,
-        )
-        self.log(
-            "train/step",
-            self.global_step,
-            on_step=True,
-            on_epoch=False,
-            sync_dist=False,
-            rank_zero_only=True,
-        )
+    def forward(self, **batch):
+        return self.model(**batch)
+
+    def training_step(self, batch, batch_idx):
+        loss = self(**batch).loss
+        self.log("train/loss", loss, on_step=True, on_epoch=False, prog_bar=True)
         return loss
 
-    def validation_step(self, batch, *args: Any, **kwargs: Any) -> STEP_OUTPUT | None:
-        print(f"validation_step - Model training mode: {self.model.training}")
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
+    def _evaluation_step(self, batch, loss_metric, accuracy_metric):
+        output = self(**batch)
         labels = batch["labels"]
-        output = self.model(
-            input_ids=input_ids, 
-            labels=labels, 
-            attention_mask=attention_mask
-        )
+        valid = labels != -100
+        token_count = valid.sum()
+        if token_count > 0:
+            predictions = output.logits.argmax(dim=-1)
+            accuracy = (predictions[valid] == labels[valid]).float().mean()
+            loss_metric.update(output.loss.detach(), weight=token_count)
+            accuracy_metric.update(accuracy, weight=token_count)
 
-        loss = output.loss
-        preds = output.logits.argmax(dim=-1)
-        non_padding_mask = labels != self.config.pad_token_id
-        preds = preds[non_padding_mask]
-        labels = labels[non_padding_mask]
+    def validation_step(self, batch, batch_idx):
+        self._evaluation_step(batch, self.validation_loss, self.validation_accuracy)
 
-        acc = self.compute_accuracy(preds[:-1], labels[:-1])
-        perplexity = torch.exp(loss.detach()) if not torch.isnan(loss) else torch.tensor(0.0)
+    def test_step(self, batch, batch_idx):
+        self._evaluation_step(batch, self.test_loss, self.test_accuracy)
 
-        self.validation_outputs.append({'val/loss': loss.detach(), 'val/acc': acc, 'val/perplexity': perplexity})#, 'test/loss': test_loss.detach(), 'test/acc': test_acc, 'test/perplexity': test_perplexity})
+    def _log_epoch_metrics(self, stage, loss_metric, accuracy_metric):
+        # MeanMetric synchronizes its accumulated values across processes.
+        loss = loss_metric.compute()
+        accuracy = accuracy_metric.compute()
+        self.log(f"{stage}/loss_epoch", loss, prog_bar=True)
+        self.log(f"{stage}/accuracy_epoch", accuracy, prog_bar=True)
+        self.log(f"{stage}/perplexity_epoch", loss.exp())
+        loss_metric.reset()
+        accuracy_metric.reset()
 
+    def on_validation_epoch_end(self):
+        self._log_epoch_metrics("val", self.validation_loss, self.validation_accuracy)
 
-    def on_validation_epoch_end(self) -> None:
-        print(f"validation_epoch_end - Model training mode: {self.model.training}")
-        avg_loss = torch.stack([x['val/loss'] for x in self.validation_outputs]).mean()
-        avg_acc = torch.stack([x['val/acc'] for x in self.validation_outputs]).mean()
-        avg_perplexity = torch.stack([x['val/perplexity'] for x in self.validation_outputs]).mean()           
-        for x in self.validation_outputs:
-            print(x['val/acc'])
-        
-        print('val_acc_meam',avg_acc)
-        # Logging epoch metrics
-        self.log("val/loss_epoch", avg_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=self.trainer.num_devices > 1)
-        self.log("val/accuracy_epoch", avg_acc, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=self.trainer.num_devices > 1)
-        self.log("val/perplexity_epoch", avg_perplexity, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=self.trainer.num_devices > 1)
-        self.validation_outputs.clear()
+    def on_test_epoch_end(self):
+        self._log_epoch_metrics("test", self.test_loss, self.test_accuracy)
 
-    def test_step(self, batch, *args: Any, **kwargs: Any) -> STEP_OUTPUT | None:
-        print(f"test_step - Model training mode: {self.model.training}")
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
-        labels = batch["labels"]
-        loss = None
-        perplexity = None
-
-        output = self.model(
-            input_ids=input_ids, 
-            labels=labels, 
-            attention_mask=attention_mask
-        )
-
-        self.test_outputs.append({
-            "outputs": outputs,
-            "labels": labels
-        })
-        
-        return None
-  
-    def on_test_epoch_end(self) -> None:
-        print(f"on_test_epoch_end - Model training mode: {self.model.training}")
-        
-        output_results = []
-
-        test_loss = torch.tensor(1.0)
-        test_losses = []
-        test_accs = []
-        test_perplexities = []
-
-        for test_batch in self.test_dataloader():
-            test_batch = {k: v.to(self.device) for k, v in test_batch.items()}
-            
-            test_input_ids = test_batch["input_ids"]
-            test_attention_mask = test_batch["attention_mask"]
-            test_labels = test_batch["labels"]
-
-            test_output = self.model(
-                input_ids=test_input_ids, 
-                labels=test_labels, 
-                attention_mask=test_attention_mask
-            )
-                        
-            if test_loss != torch.tensor(0.0):      
-                test_loss = test_output.loss
-                test_perplexity = torch.exp(test_loss.detach()) if not torch.isnan(test_loss) else torch.tensor(0.0)
-                test_preds = test_output.logits.argmax(dim=-1)
-            
-            test_non_padding_mask = test_labels != self.config.pad_token_id
-            test_preds = test_preds[test_non_padding_mask]
-            test_labels = test_labels[test_non_padding_mask]
-            
-            test_acc = self.compute_accuracy(test_preds[:-1], test_labels[:-1])
-
-            test_losses.append(test_loss.detach())
-            test_accs.append(test_acc)
-            test_perplexities.append(test_perplexity)
-
-        test_avg_loss = torch.stack(test_losses).mean()
-        test_avg_acc = torch.stack(test_accs).mean()
-        test_avg_perplexity = torch.stack(test_perplexities).mean()
-        
-        
-        # Logging epoch metrics
-        self.log("test/loss_epoch", test_avg_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=self.trainer.num_devices > 1)
-        self.log("test/accuracy_epoch", test_avg_acc, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=self.trainer.num_devices > 1)
-        self.log("test/perplexity_epoch", test_avg_perplexity, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=self.trainer.num_devices > 1)
-
-        self.test_outputs.clear()
-
-    def test_dataloader(self):
-        return DataLoader(
-            self._testset,
-            collate_fn=self.eval_collator,
-            batch_size=self.args.eval_batch_size,
-            shuffle=False,
-            num_workers=self.args.num_workers,
-        )
-    def configure_optimizers(self) -> Any:
-        no_decay = [
-            "bias",
-            "LayerNorm.weight",
-        ]  # no decay for bias and LayerNorm.weight
-
-        optimizer_grouped_parameters = [
-            {
-                "params": [
-                    p
-                    for n, p in self.model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and p.requires_grad
-                ],
-                "weight_decay": self.weight_decay,
-            },
-            {
-                "params": [
-                    p
-                    for n, p in self.model.named_parameters()
-                    if any(nd in n for nd in no_decay) and p.requires_grad
-                ],
-                "weight_decay": 0.0,
-            },
-        ]
+    def configure_optimizers(self):
+        decay, no_decay = [], []
+        for name, parameter in self.model.named_parameters():
+            if parameter.requires_grad:
+                group = (
+                    no_decay if parameter.ndim < 2 or name.endswith("bias") else decay
+                )
+                group.append(parameter)
         optimizer = torch.optim.AdamW(
-            optimizer_grouped_parameters,
-            lr=self.lr,
-            eps=self.adam_epsilon,
-            betas=(self.adam_beta1, self.adam_beta2),
+            [
+                {"params": decay, "weight_decay": self.hparams.weight_decay},
+                {"params": no_decay, "weight_decay": 0.0},
+            ],
+            lr=self.hparams.lr,
+            betas=(self.hparams.adam_beta1, self.hparams.adam_beta2),
+            eps=self.hparams.adam_epsilon,
         )
         scheduler = get_scheduler(
-            self.scheduler_type,
+            self.hparams.scheduler_type,
             optimizer=optimizer,
-            num_warmup_steps=self.warmup_steps,
-            num_training_steps=self.warmup_max_steps,
+            num_warmup_steps=self.hparams.warmup_steps,
+            num_training_steps=self.trainer.estimated_stepping_batches,
         )
-        scheduler = {"scheduler": scheduler, "interval": "step", "frequency": 1}
-        return [optimizer], [scheduler]
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }
+
+
+# Preserve the historical import name. Constructor options are documented
+# by Seq2SeqModule rather than inferred from an argparse Namespace.
+LightningProLM = Seq2SeqModule

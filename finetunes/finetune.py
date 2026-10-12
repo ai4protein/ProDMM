@@ -2,8 +2,7 @@ import argparse
 import numpy as np
 from typing import Any
 from lightning.pytorch.utilities.types import STEP_OUTPUT
-from pytorch_lightning.callbacks import EarlyStopping
-from pytorch_lightning.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping
 from Bio.Seq import Seq
 from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.strategies import DDPStrategy
@@ -15,10 +14,8 @@ from prodmm.encoder_tokenizer.unitokenizer import UniTokenizer
 from prodmm.encoder.configuration_prolm import ProLMConfig
 from finetunes.ft_model import ProBLAMForSequenceClassification
 from transformers import get_scheduler
-import torch
-from pytorch_lightning import LightningDataModule, LightningModule, seed_everything, Trainer
+from lightning import LightningDataModule, LightningModule, seed_everything, Trainer
 from torch.utils.data import DataLoader
-import os
 import json
 from sklearn.model_selection import KFold
 from datasets import load_dataset, Features, Value, Sequence
@@ -116,7 +113,7 @@ class BertCollatorFinetune:
             else:
                 seqs = [(item["S"], 'cds') for item in batch]
 
-        seqs = [self.tokenizer.tokenize(text=item) for item in seqs]
+        seqs = [self.tokenizer.tokenize(text=item, special_add=None) for item in seqs]
 
         if self.problem_type == "regression":
             labels = torch.tensor([item["value"] for item in batch])
